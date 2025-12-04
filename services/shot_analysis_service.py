@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional
 from .pose_processor import PoseProcessor
 from .phase_detector import PhaseDetector
 from .metrics_calculator import MetricsCalculator
+from .video_visualizer import VideoVisualizer
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class ShotAnalysisService:
         self.pose_processor = PoseProcessor(model_complexity=1)
         self.phase_detector = PhaseDetector()
         self.metrics_calculator = MetricsCalculator()
+        self.video_visualizer = VideoVisualizer()
 
         logger.info("✅ ShotAnalysisService initialized for form analysis")
 
@@ -132,6 +134,51 @@ class ShotAnalysisService:
                 'error': str(e),
                 'confidence': 0.0
             }
+
+    def analyze_with_overlay(
+        self,
+        video_path: str,
+        baseline_player: Optional[str] = None,
+        frame_skip: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Complete analysis with color-coded overlay visualization
+
+        Args:
+            video_path: Path to user's video
+            baseline_player: Ignored (for backwards compatibility)
+            frame_skip: Process every Nth frame
+
+        Returns:
+            Analysis results with overlay_video_path
+        """
+        logger.info(f"🎨 Analysis with overlay visualization")
+
+        # Run standard analysis
+        results = self.analyze_shot(video_path, frame_skip)
+
+        if not results.get('success'):
+            return results
+
+        # Generate overlay video
+        try:
+            # Get pose data from cache (already processed)
+            pose_data = self.pose_processor.process_video(video_path, frame_skip=frame_skip)
+
+            overlay_video_path = self.video_visualizer.create_overlay_video(
+                video_path=video_path,
+                keypoints_sequence=pose_data['keypoints_sequence'],
+                analysis_results=results
+            )
+
+            results['overlay_video_path'] = overlay_video_path
+            logger.info(f"✅ Overlay video generated: {overlay_video_path}")
+
+        except Exception as e:
+            logger.error(f"❌ Overlay video generation failed: {e}", exc_info=True)
+            results['overlay_video_error'] = str(e)
+
+        return results
 
     def _generate_coaching_cues(self, metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
         """

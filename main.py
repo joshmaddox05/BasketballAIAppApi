@@ -4,7 +4,7 @@ AI-powered shooting form analysis with personalized coaching feedback
 """
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 import uuid
 import os
 from typing import Dict, Any, Optional
@@ -452,6 +452,144 @@ def _format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
             formatted[metric_key]['unit'] = 'degrees'
 
     return formatted
+
+
+@app.post("/analyze/with-overlay")
+async def analyze_with_overlay_visualization(
+    video: UploadFile = File(...),
+    frame_skip: int = Form(default=1)
+):
+    """
+    Analyze shot and generate color-coded overlay video
+
+    Features:
+    - Full shot analysis with metrics
+    - Color-coded skeleton overlay (green=good, red=poor)
+    - Real-time metrics display
+    - Phase indicators
+
+    Args:
+        video: Video file (mp4, mov, avi, mkv)
+        frame_skip: Process every Nth frame (default: 1)
+
+    Returns:
+        Analysis results + visualization video download URL
+    """
+    file_path = None
+
+    try:
+        # Get analysis service
+        analysis_service = get_shot_analysis_service()
+
+        # Generate unique video ID
+        video_id = str(uuid.uuid4())
+
+        # Validate file type
+        if not video.filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv')):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file type. Supported: mp4, mov, avi, mkv"
+            )
+
+        # Save video file
+        file_path = UPLOAD_DIR / f"{video_id}.mp4"
+        logger.info(f"💾 Saving video: {file_path}")
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(video.file, buffer)
+
+        logger.info(f"✅ Video saved, starting analysis with overlay...")
+
+        # Perform analysis with overlay
+        results = analysis_service.analyze_with_overlay(
+            video_path=str(file_path),
+            frame_skip=frame_skip
+        )
+
+        if not results.get('success', False):
+            # Analysis failed
+            error_response = {
+                "video_id": video_id,
+                "success": False,
+                "error": results.get('error', 'Unknown error'),
+                "confidence": results.get('confidence', 0.0),
+                "analyzed_at": datetime.now().isoformat()
+            }
+
+            # Clean up
+            if file_path and file_path.exists():
+                file_path.unlink()
+
+            logger.warning(f"⚠️ Analysis with overlay failed: {error_response['error']}")
+            return JSONResponse(status_code=200, content=error_response, cls=NumpyEncoder)
+
+        # Format response
+        response = {
+            "video_id": video_id,
+            "success": True,
+            "analysis_mode": "overlay_visualization",
+            "overall_score": round(results['overall_score'], 1),
+            "confidence": round(results['confidence'], 2),
+
+            # Overlay video info
+            "visualization_video": {
+                "path": results.get('overlay_video_path', ''),
+                "download_url": f"/download/overlay/{Path(results.get('overlay_video_path', '')).name}" if results.get('overlay_video_path') else None
+            },
+
+            # Phases
+            "phases": results.get('phases', {}),
+
+            # Metrics summary
+            "metrics": _format_metrics(results.get('metrics', {})),
+
+            # Coaching cues
+            "coaching_cues": results.get('coaching_cues', []),
+
+            "analyzed_at": datetime.now().isoformat()
+        }
+
+        # Clean up original video
+        if file_path and file_path.exists():
+            file_path.unlink()
+            logger.info(f"🗑️ Cleaned up original video")
+
+        logger.info(f"✅ Overlay video analysis complete!")
+
+        # Force garbage collection
+        gc.collect()
+
+        return JSONResponse(content=response, cls=NumpyEncoder)
+
+    except Exception as e:
+        logger.error(f"❌ Overlay analysis error: {str(e)}", exc_info=True)
+
+        # Clean up on error
+        if file_path and file_path.exists():
+            file_path.unlink()
+
+        gc.collect()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Overlay analysis failed: {str(e)}"
+        )
+
+
+@app.get("/download/overlay/{filename}")
+async def download_overlay(filename: str):
+    """Download generated overlay video"""
+    from pathlib import Path as PathLib
+    file_path = PathLib("output/visualizations") / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Overlay video not found")
+
+    return FileResponse(
+        str(file_path),
+        media_type="video/mp4",
+        filename=filename
+    )
 
 
 if __name__ == "__main__":
