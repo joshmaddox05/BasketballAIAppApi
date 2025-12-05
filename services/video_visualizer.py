@@ -53,6 +53,18 @@ class VideoVisualizer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"✅ VideoVisualizer initialized. Output: {self.output_dir}")
 
+    def _normalize_keypoints(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize keypoint names to uppercase for consistent lookup"""
+        normalized = {}
+        for key, value in keypoints.items():
+            # Skip non-keypoint fields like 'frame' and 'timestamp'
+            if key in ('frame', 'timestamp'):
+                normalized[key] = value
+            else:
+                # Convert to uppercase (e.g., 'right_shoulder' -> 'RIGHT_SHOULDER')
+                normalized[key.upper()] = value
+        return normalized
+
     def create_overlay_video(
         self,
         video_path: str,
@@ -97,6 +109,7 @@ class VideoVisualizer:
         metrics = analysis_results.get('metrics', {})
         phases = analysis_results.get('phases', {})
         overall_score = analysis_results.get('overall_score', 50)
+        shooting_hand = phases.get('shooting_hand', 'right')
 
         frame_idx = 0
         keypoint_idx = 0
@@ -119,7 +132,7 @@ class VideoVisualizer:
 
                     # Draw skeleton overlay
                     frame = self._draw_skeleton(
-                        frame, kp, metrics, phase_name, phase_color
+                        frame, kp, metrics, phase_name, phase_color, shooting_hand
                     )
 
                     # Draw metrics overlay
@@ -179,15 +192,19 @@ class VideoVisualizer:
         keypoints: Dict[str, Any],
         metrics: Dict[str, Any],
         phase_name: str,
-        base_color: Tuple[int, int, int]
+        base_color: Tuple[int, int, int],
+        shooting_hand: str = 'right'
     ) -> np.ndarray:
         """Draw pose skeleton with color-coded joints based on form quality"""
 
         height, width = frame.shape[:2]
         overlay = frame.copy()
 
-        # Get joint quality colors
-        joint_colors = self._get_joint_colors(keypoints, metrics, base_color)
+        # Normalize keypoints to uppercase for consistent lookup with POSE_CONNECTIONS
+        keypoints = self._normalize_keypoints(keypoints)
+
+        # Get joint quality colors (using detected shooting hand)
+        joint_colors = self._get_joint_colors(keypoints, metrics, base_color, shooting_hand)
 
         # Draw connections (bones)
         for connection in self.POSE_CONNECTIONS:
@@ -233,14 +250,16 @@ class VideoVisualizer:
         self,
         keypoints: Dict[str, Any],
         metrics: Dict[str, Any],
-        base_color: Tuple[int, int, int]
+        base_color: Tuple[int, int, int],
+        shooting_hand: str = 'right'
     ) -> Dict[str, Tuple[int, int, int]]:
         """Determine color for each joint based on form quality"""
 
         joint_colors = {}
 
-        # Color shooting arm based on metrics
-        shooting_arm_joints = ['RIGHT_SHOULDER', 'RIGHT_ELBOW', 'RIGHT_WRIST']
+        # Color shooting arm based on metrics (using detected shooting hand)
+        hand = shooting_hand.upper()
+        shooting_arm_joints = [f'{hand}_SHOULDER', f'{hand}_ELBOW', f'{hand}_WRIST']
 
         # Elbow flare quality
         elbow_flare = metrics.get('elbow_flare', {})
@@ -255,7 +274,7 @@ class VideoVisualizer:
         release_quality = release_angle.get('quality_score', 5.0)
         release_color = self._quality_to_color(release_quality)
 
-        joint_colors['RIGHT_ELBOW'] = release_color  # Override with release quality
+        joint_colors[f'{hand}_ELBOW'] = release_color  # Override with release quality
 
         # Knee quality
         knee_load = metrics.get('knee_load', {})

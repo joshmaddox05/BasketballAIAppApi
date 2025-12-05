@@ -14,13 +14,13 @@ class MetricsCalculator:
     def __init__(self):
         # Define optimal ranges for each metric
         self.optimal_ranges = {
-            'release_angle': (55, 62),      # degrees
-            'elbow_flare': (0, 10),         # degrees
-            'knee_load': (70, 90),          # degrees
-            'hip_shoulder_alignment': (0, 15),  # degrees
-            'base_width': (0.15, 0.25),     # ratio of body height
+            'release_angle': (145, 180),    # degrees - elbow angle at release (extended arm, 180=straight)
+            'elbow_flare': (0, 15),         # degrees - horizontal deviation from vertical
+            'knee_load': (120, 160),        # degrees - interior angle (180=straight, lower=more bent)
+            'hip_shoulder_alignment': (0, 15),  # degrees - rotation difference
+            'base_width': (0.10, 0.30),     # ratio of body height - stance width
             'lateral_sway': (0, 0.05),      # ratio of body height
-            'arc_trajectory': (45, 55)      # degrees
+            'arc_trajectory': (30, 90)      # degrees - wrist trajectory angle
         }
         
         # Metric weights for overall score
@@ -35,56 +35,73 @@ class MetricsCalculator:
         }
         
         logger.info("✅ MetricsCalculator initialized")
-    
+
+    def _normalize_keypoints(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize keypoint names to uppercase for consistent lookup"""
+        normalized = {}
+        for key, value in keypoints.items():
+            # Skip non-keypoint fields like 'frame' and 'timestamp'
+            if key in ('frame', 'timestamp'):
+                normalized[key] = value
+            else:
+                # Convert to uppercase (e.g., 'right_shoulder' -> 'RIGHT_SHOULDER')
+                normalized[key.upper()] = value
+        return normalized
+
     def calculate_all_metrics(
-        self, 
-        keypoints_sequence: List[Dict[str, Any]], 
+        self,
+        keypoints_sequence: List[Dict[str, Any]],
         phases: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Calculate all biomechanical metrics
-        
+
         Args:
             keypoints_sequence: List of pose keypoints per frame
             phases: Detected shot phases with frame indices
-            
+
         Returns:
             Dictionary with all metrics and overall score
         """
         try:
             logger.info("📊 Calculating biomechanical metrics...")
-            
+
+            # Get the detected shooting hand (default to right for backwards compatibility)
+            shooting_hand = phases.get('shooting_hand', 'right')
+            logger.info(f"🎯 Using shooting hand: {shooting_hand}")
+
             metrics = {}
-            
+
             # Extract key frames
-            release_frame = phases.get('release', {}).get('frame')
-            load_frame = phases.get('load', {}).get('frame')
-            dip_frame = phases.get('dip_start', {}).get('frame')
-            
+            release_frame = phases.get('release', {}).get('frame') if phases.get('release') else None
+            load_frame = phases.get('load', {}).get('frame') if phases.get('load') else None
+            dip_frame = phases.get('dip_start', {}).get('frame') if phases.get('dip_start') else None
+
             if release_frame is None or load_frame is None:
                 return {
                     'error': 'Missing required phase frames',
                     'confidence': 0.0
                 }
-            
+
             # Get keypoints at key moments
             release_kp = keypoints_sequence[release_frame] if release_frame < len(keypoints_sequence) else None
             load_kp = keypoints_sequence[load_frame] if load_frame < len(keypoints_sequence) else None
-            
+
             if not release_kp or not load_kp:
                 return {
                     'error': 'Missing keypoint data at key frames',
                     'confidence': 0.0
                 }
-            
-            # Calculate each metric
-            metrics['release_angle'] = self._calculate_release_angle(release_kp)
-            metrics['elbow_flare'] = self._calculate_elbow_flare(release_kp)
+
+            # Calculate each metric (passing shooting_hand to arm-specific metrics)
+            metrics['release_angle'] = self._calculate_release_angle(release_kp, shooting_hand)
+            # Elbow flare should be measured at load/set position, not at full extension
+            metrics['elbow_flare'] = self._calculate_elbow_flare(load_kp, shooting_hand)
             metrics['knee_load'] = self._calculate_knee_angle(load_kp)
             metrics['hip_shoulder_alignment'] = self._calculate_alignment(load_kp)
             metrics['base_width'] = self._calculate_base_width(load_kp)
             metrics['lateral_sway'] = self._calculate_lateral_sway(keypoints_sequence, phases)
-            metrics['arc_trajectory'] = self._calculate_arc_trajectory(keypoints_sequence, phases)
+            metrics['arc_trajectory'] = self._calculate_arc_trajectory(keypoints_sequence, phases, shooting_hand)
             
             # Calculate overall score
             overall_score = self._calculate_overall_score(metrics)
@@ -100,13 +117,16 @@ class MetricsCalculator:
                 'confidence': 0.0
             }
     
-    def _calculate_release_angle(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
+    def _calculate_release_angle(self, keypoints: Dict[str, Any], shooting_hand: str = 'right') -> Dict[str, Any]:
         """Calculate elbow angle at release (shoulder-elbow-wrist)"""
         try:
-            # Get right side keypoints (assuming right-handed shooter)
-            shoulder = np.array([keypoints['RIGHT_SHOULDER']['x'], keypoints['RIGHT_SHOULDER']['y']])
-            elbow = np.array([keypoints['RIGHT_ELBOW']['x'], keypoints['RIGHT_ELBOW']['y']])
-            wrist = np.array([keypoints['RIGHT_WRIST']['x'], keypoints['RIGHT_WRIST']['y']])
+            # Normalize keypoint names to uppercase
+            keypoints = self._normalize_keypoints(keypoints)
+            # Get shooting arm keypoints
+            hand = shooting_hand.upper()
+            shoulder = np.array([keypoints[f'{hand}_SHOULDER']['x'], keypoints[f'{hand}_SHOULDER']['y']])
+            elbow = np.array([keypoints[f'{hand}_ELBOW']['x'], keypoints[f'{hand}_ELBOW']['y']])
+            wrist = np.array([keypoints[f'{hand}_WRIST']['x'], keypoints[f'{hand}_WRIST']['y']])
             
             # Calculate angle
             angle = self._calculate_angle(shoulder, elbow, wrist)
@@ -132,12 +152,15 @@ class MetricsCalculator:
                 'error': f'Missing keypoint: {e}'
             }
     
-    def _calculate_elbow_flare(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
+    def _calculate_elbow_flare(self, keypoints: Dict[str, Any], shooting_hand: str = 'right') -> Dict[str, Any]:
         """Calculate elbow alignment (deviation from vertical plane)"""
         try:
-            # Get keypoints
-            shoulder = np.array([keypoints['RIGHT_SHOULDER']['x'], keypoints['RIGHT_SHOULDER']['y']])
-            elbow = np.array([keypoints['RIGHT_ELBOW']['x'], keypoints['RIGHT_ELBOW']['y']])
+            # Normalize keypoint names to uppercase
+            keypoints = self._normalize_keypoints(keypoints)
+            # Get shooting arm keypoints
+            hand = shooting_hand.upper()
+            shoulder = np.array([keypoints[f'{hand}_SHOULDER']['x'], keypoints[f'{hand}_SHOULDER']['y']])
+            elbow = np.array([keypoints[f'{hand}_ELBOW']['x'], keypoints[f'{hand}_ELBOW']['y']])
             
             # Calculate horizontal deviation
             shoulder_to_elbow = elbow - shoulder
@@ -165,17 +188,26 @@ class MetricsCalculator:
             }
     
     def _calculate_knee_angle(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate knee flexion angle at load (hip-knee-ankle)"""
+        """Calculate knee flexion angle at load (hip-knee-ankle)
+
+        Note: We measure the interior angle at the knee.
+        - Straight leg = ~180°
+        - Fully bent (squat) = ~45°
+        - Optimal load position = 120-150° (slight to moderate bend)
+        """
         try:
+            # Normalize keypoint names to uppercase
+            keypoints = self._normalize_keypoints(keypoints)
             # Get right leg keypoints
             hip = np.array([keypoints['RIGHT_HIP']['x'], keypoints['RIGHT_HIP']['y']])
             knee = np.array([keypoints['RIGHT_KNEE']['x'], keypoints['RIGHT_KNEE']['y']])
             ankle = np.array([keypoints['RIGHT_ANKLE']['x'], keypoints['RIGHT_ANKLE']['y']])
-            
-            # Calculate angle
+
+            # Calculate interior angle at knee (straight leg = 180°, bent = lower)
             angle = self._calculate_angle(hip, knee, ankle)
-            
-            # Quality score
+
+            # Quality score - updated optimal range for interior angle
+            # 120-150° represents a good athletic load position
             quality = self._score_metric(angle, self.optimal_ranges['knee_load'])
             
             return {
@@ -199,12 +231,14 @@ class MetricsCalculator:
     def _calculate_alignment(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate hip-shoulder alignment (rotation)"""
         try:
+            # Normalize keypoint names to uppercase
+            keypoints = self._normalize_keypoints(keypoints)
             # Get shoulder and hip keypoints
             left_shoulder = np.array([keypoints['LEFT_SHOULDER']['x'], keypoints['LEFT_SHOULDER']['y']])
             right_shoulder = np.array([keypoints['RIGHT_SHOULDER']['x'], keypoints['RIGHT_SHOULDER']['y']])
             left_hip = np.array([keypoints['LEFT_HIP']['x'], keypoints['LEFT_HIP']['y']])
             right_hip = np.array([keypoints['RIGHT_HIP']['x'], keypoints['RIGHT_HIP']['y']])
-            
+
             # Calculate shoulder and hip lines
             shoulder_angle = np.degrees(np.arctan2(
                 right_shoulder[1] - left_shoulder[1],
@@ -214,9 +248,12 @@ class MetricsCalculator:
                 right_hip[1] - left_hip[1],
                 right_hip[0] - left_hip[0]
             ))
-            
-            # Rotation difference
+
+            # Rotation difference - handle angle wrapping
             rotation = abs(shoulder_angle - hip_angle)
+            # Normalize to 0-180 range (angles can wrap around 360)
+            if rotation > 180:
+                rotation = 360 - rotation
             
             # Quality score
             quality = self._score_metric(rotation, self.optimal_ranges['hip_shoulder_alignment'])
@@ -242,6 +279,8 @@ class MetricsCalculator:
     def _calculate_base_width(self, keypoints: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate base width as ratio of body height"""
         try:
+            # Normalize keypoint names to uppercase
+            keypoints = self._normalize_keypoints(keypoints)
             # Get ankle positions
             left_ankle = np.array([keypoints['LEFT_ANKLE']['x'], keypoints['LEFT_ANKLE']['y']])
             right_ankle = np.array([keypoints['RIGHT_ANKLE']['x'], keypoints['RIGHT_ANKLE']['y']])
@@ -283,28 +322,39 @@ class MetricsCalculator:
     ) -> Dict[str, Any]:
         """Calculate lateral movement during shot"""
         try:
-            dip_frame = phases.get('dip_start', {}).get('frame', 0)
-            release_frame = phases.get('release', {}).get('frame', len(keypoints_sequence) - 1)
-            
+            # Use dip_start if available, otherwise use load as starting point
+            dip_start = phases.get('dip_start')
+            load = phases.get('load')
+            release = phases.get('release')
+
+            if dip_start:
+                start_frame = dip_start.get('frame', 0)
+            elif load:
+                start_frame = load.get('frame', 0)
+            else:
+                start_frame = 0
+
+            release_frame = release.get('frame', len(keypoints_sequence) - 1) if release else len(keypoints_sequence) - 1
+
             # Track hip center movement
             hip_positions = []
-            for i in range(dip_frame, min(release_frame + 1, len(keypoints_sequence))):
-                kp = keypoints_sequence[i]
+            for i in range(start_frame, min(release_frame + 1, len(keypoints_sequence))):
+                kp = self._normalize_keypoints(keypoints_sequence[i])
                 left_hip = np.array([kp['LEFT_HIP']['x'], kp['LEFT_HIP']['y']])
                 right_hip = np.array([kp['RIGHT_HIP']['x'], kp['RIGHT_HIP']['y']])
                 mid_hip = (left_hip + right_hip) / 2
                 hip_positions.append(mid_hip)
-            
+
             if len(hip_positions) < 2:
                 raise ValueError("Not enough frames to calculate sway")
-            
+
             hip_positions = np.array(hip_positions)
-            
+
             # Calculate maximum lateral deviation
             lateral_movement = np.std(hip_positions[:, 0])
-            
+
             # Normalize by body height
-            body_height = self._get_body_height(keypoints_sequence[dip_frame])
+            body_height = self._get_body_height(self._normalize_keypoints(keypoints_sequence[start_frame]))
             sway_ratio = lateral_movement / body_height if body_height > 0 else 0
             
             # Quality score (lower is better)
@@ -329,24 +379,26 @@ class MetricsCalculator:
             }
     
     def _calculate_arc_trajectory(
-        self, 
-        keypoints_sequence: List[Dict[str, Any]], 
-        phases: Dict[str, Any]
+        self,
+        keypoints_sequence: List[Dict[str, Any]],
+        phases: Dict[str, Any],
+        shooting_hand: str = 'right'
     ) -> Dict[str, Any]:
         """Calculate shot arc angle from release"""
         try:
-            release_frame = phases.get('release', {}).get('frame')
-            follow_through_frame = phases.get('follow_through_end', {}).get('frame')
-            
+            release_frame = phases.get('release', {}).get('frame') if phases.get('release') else None
+            follow_through_frame = phases.get('follow_through_end', {}).get('frame') if phases.get('follow_through_end') else None
+
             if release_frame is None or follow_through_frame is None:
                 raise ValueError("Missing release or follow-through frames")
-            
-            # Get wrist positions
-            release_kp = keypoints_sequence[min(release_frame, len(keypoints_sequence) - 1)]
-            follow_kp = keypoints_sequence[min(follow_through_frame, len(keypoints_sequence) - 1)]
-            
-            release_wrist = np.array([release_kp['RIGHT_WRIST']['x'], release_kp['RIGHT_WRIST']['y']])
-            follow_wrist = np.array([follow_kp['RIGHT_WRIST']['x'], follow_kp['RIGHT_WRIST']['y']])
+
+            # Get wrist positions using shooting hand
+            hand = shooting_hand.upper()
+            release_kp = self._normalize_keypoints(keypoints_sequence[min(release_frame, len(keypoints_sequence) - 1)])
+            follow_kp = self._normalize_keypoints(keypoints_sequence[min(follow_through_frame, len(keypoints_sequence) - 1)])
+
+            release_wrist = np.array([release_kp[f'{hand}_WRIST']['x'], release_kp[f'{hand}_WRIST']['y']])
+            follow_wrist = np.array([follow_kp[f'{hand}_WRIST']['x'], follow_kp[f'{hand}_WRIST']['y']])
             
             # Calculate trajectory angle
             delta = follow_wrist - release_wrist

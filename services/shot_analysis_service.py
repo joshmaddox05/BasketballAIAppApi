@@ -69,7 +69,8 @@ class ShotAnalysisService:
                 }
 
             # Step 2: Detect shooting phases (dip, load, release, follow-through)
-            phases = self.phase_detector.detect_phases(pose_data['keypoints_sequence'])
+            fps = pose_data['metadata'].get('fps', 30.0)
+            phases = self.phase_detector.detect_phases(pose_data['keypoints_sequence'], fps=fps)
 
             if not phases.get('valid', False):
                 return {
@@ -115,6 +116,7 @@ class ShotAnalysisService:
                     'load': phases['load'],
                     'release': phases['release'],
                     'follow_through_end': phases['follow_through_end'],
+                    'shooting_hand': phases.get('shooting_hand', 'right'),
                     'timing': phases.get('timing', {})
                 },
                 'metrics': metrics,
@@ -237,7 +239,7 @@ class ShotAnalysisService:
         return [
             {
                 'metric': 'elbow_flare',
-                'condition': 'angle_deg > 12',
+                'condition': 'angle_deg > 15',
                 'weight': 0.25,
                 'cue': 'Keep your elbow tucked under the ball',
                 'why': 'Elbow flare causes the ball to spin sideways, leading to inconsistent left/right misses. A tucked elbow creates backspin for a softer touch.',
@@ -252,33 +254,33 @@ class ShotAnalysisService:
             },
             {
                 'metric': 'release_angle',
-                'condition': 'angle_deg < 55 or angle_deg > 62',
+                'condition': 'angle_deg < 145',
                 'weight': 0.25,
-                'cue': 'Adjust your release angle for optimal arc',
-                'why': 'A 55-62 degree release angle creates the ideal arc for the ball to enter the basket at an angle that maximizes the effective target area.',
-                'drill': 'Arc Training',
-                'drill_description': 'Use a visual target about 3 feet above the rim (like tape on a wall or backboard). Practice shooting over this target from close range, then gradually move back. Focus on consistent high arc.',
+                'cue': 'Fully extend your arm on the release',
+                'why': 'A fully extended arm (145-180° elbow angle) provides maximum power transfer and consistent release point. Under-extension leads to pushing the ball.',
+                'drill': 'Follow Through Hold',
+                'drill_description': 'After each shot, freeze your follow-through position for 2 seconds. Your arm should be fully extended with wrist snapped down. This builds muscle memory for complete extension.',
                 'common_mistakes': [
-                    'Flat shot - pushing the ball forward instead of up',
-                    'Releasing too early in the motion',
-                    'Not extending fully through the shot'
+                    'Releasing before full extension (pushing)',
+                    'Elbow dropping during release',
+                    'Not following through completely'
                 ],
-                'visual_cue': 'The ball should reach its peak height about 2/3 of the way to the basket'
+                'visual_cue': 'At release, your arm should be nearly straight with fingers pointing at the basket'
             },
             {
                 'metric': 'knee_load',
-                'condition': 'angle_deg < 70 or angle_deg > 90',
+                'condition': 'angle_deg < 120 or angle_deg > 160',
                 'weight': 0.20,
-                'cue': 'Bend your knees to 70-90 degrees at your load point',
-                'why': 'Proper knee bend stores elastic energy that transfers up through your body into the shot. Too little bend means arm-only shooting; too much wastes energy.',
-                'drill': 'Chair Shooting',
-                'drill_description': 'Place a chair behind you. Practice sitting back until you lightly touch the chair (this is your load point), then shoot. This builds muscle memory for proper depth.',
+                'cue': 'Get into an athletic stance with proper knee bend',
+                'why': 'Proper knee bend (120-160° angle) stores elastic energy that transfers through your body into the shot. Too straight means arm-only shooting; too bent wastes energy.',
+                'drill': 'Athletic Stance Shooting',
+                'drill_description': 'Start in an athletic stance with knees slightly bent. Practice receiving a pass and immediately shooting while maintaining that athletic posture throughout.',
                 'common_mistakes': [
-                    'Barely bending knees (shooting with arms only)',
+                    'Standing too straight (shooting with arms only)',
                     'Squatting too deep and losing balance',
                     'Bending at the waist instead of the knees'
                 ],
-                'visual_cue': 'At your lowest point, your thighs should be roughly parallel to the ground'
+                'visual_cue': 'Your knees should be slightly bent, like you are ready to jump at any moment'
             },
             {
                 'metric': 'hip_shoulder_alignment',
@@ -312,7 +314,7 @@ class ShotAnalysisService:
             },
             {
                 'metric': 'base_width',
-                'condition': 'ratio < 0.15 or ratio > 0.25',
+                'condition': 'ratio < 0.10 or ratio > 0.30',
                 'weight': 0.10,
                 'cue': 'Set your feet shoulder-width apart for a stable base',
                 'why': 'Your stance is your foundation. Too narrow and you lack stability; too wide and you can\'t generate power efficiently through your legs.',
@@ -327,10 +329,10 @@ class ShotAnalysisService:
             },
             {
                 'metric': 'arc_trajectory',
-                'condition': 'arc_angle_deg < 45 or arc_angle_deg > 55',
+                'condition': 'arc_angle_deg < 30 or arc_angle_deg > 90',
                 'weight': 0.10,
-                'cue': 'Focus on a 45-55 degree ball trajectory',
-                'why': 'The ball\'s flight path determines how much of the rim is "open" for the ball to go through. A 45-55 degree entry angle maximizes your margin for error.',
+                'cue': 'Focus on proper follow-through arc',
+                'why': 'The wrist trajectory after release determines the ball\'s flight path. A proper follow-through (30-90° wrist angle) creates good arc.',
                 'drill': 'Swish Shooting',
                 'drill_description': 'From close range, focus on making nothing-but-net shots. A swish requires the right arc. Count how many swishes you can make in a row.',
                 'common_mistakes': [
