@@ -285,8 +285,8 @@ async def analyze_shot(
 
             # Quality information
             "quality": {
-                "visibility_ratio": round(results['quality_info']['visibility_ratio'], 2),
-                "confidence": round(results['quality_info']['confidence'], 2),
+                "confidence": round(results['quality_info'].get('confidence', 0.0), 2),
+                "low_confidence_frames": results['quality_info'].get('low_confidence_frames', 0),
                 "warning": results['quality_info'].get('warning')
             },
 
