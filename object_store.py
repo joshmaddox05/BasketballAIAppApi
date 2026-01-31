@@ -202,3 +202,45 @@ def upload_file(file_path: str, object_key: str, content_type: str = "video/mp4"
     )
 
     logger.info(f"Uploaded {object_key} successfully")
+
+
+def presign_get(object_key: str, expires_in: int = None) -> str:
+    """
+    Generate a presigned GET URL for downloading a file.
+
+    Args:
+        object_key: The S3 object key
+        expires_in: URL expiration time in seconds (default: PRESIGN_EXPIRE_SECONDS)
+
+    Returns:
+        Presigned download URL
+    """
+    client = _get_client()
+
+    if expires_in is None:
+        expires_in = config.PRESIGN_EXPIRE_SECONDS
+
+    presigned_url = client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": config.OBJECT_STORE_BUCKET,
+            "Key": object_key
+        },
+        ExpiresIn=expires_in
+    )
+
+    logger.info(f"Generated presigned GET URL for: {object_key}")
+    return presigned_url
+
+
+def make_overlay_key(session_id: str) -> str:
+    """
+    Generate an object key for an overlay video file.
+
+    Args:
+        session_id: The session UUID
+
+    Returns:
+        Object key in format "overlays/{session_id}_overlay.mp4"
+    """
+    return f"overlays/{session_id}_overlay.mp4"

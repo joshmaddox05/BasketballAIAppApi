@@ -177,6 +177,7 @@ def process_session(session_id: str) -> None:
         session_id: The session UUID to process
     """
     temp_path = None
+    overlay_temp_path = None
     timings_ms = {}
     start_time = time.time()
 
@@ -312,9 +313,29 @@ def process_session(session_id: str) -> None:
             "analyzed_at": datetime.utcnow().isoformat() + "Z"
         }
 
-        # Include overlay path if present
-        if 'overlay_video_path' in results:
-            response['overlay_video_path'] = results['overlay_video_path']
+        # Handle overlay video if present
+        overlay_temp_path = None
+        if 'overlay_video_path' in results and results['overlay_video_path']:
+            overlay_temp_path = results['overlay_video_path']
+
+            # Upload overlay video to object storage
+            try:
+                overlay_object_key = object_store.make_overlay_key(session_id)
+                object_store.upload_file(overlay_temp_path, overlay_object_key, "video/mp4")
+
+                # Generate presigned download URL (valid for 7 days)
+                overlay_download_url = object_store.presign_get(overlay_object_key, expires_in=604800)
+
+                response['overlay_video'] = {
+                    "object_key": overlay_object_key,
+                    "download_url": overlay_download_url
+                }
+
+                logger.info(f"Overlay video uploaded: {overlay_object_key}")
+
+            except Exception as e:
+                logger.error(f"Failed to upload overlay video: {e}")
+                response['overlay_video_error'] = str(e)
 
         # Ensure JSON serializable
         response = ensure_json_serializable(response)
@@ -339,13 +360,20 @@ def process_session(session_id: str) -> None:
         )
 
     finally:
-        # Clean up temp file
+        # Clean up temp files
         if temp_path and os.path.exists(temp_path):
             try:
                 os.unlink(temp_path)
                 logger.info(f"Cleaned up temp file: {temp_path}")
             except Exception as e:
                 logger.warning(f"Failed to clean up temp file {temp_path}: {e}")
+
+        if overlay_temp_path and os.path.exists(overlay_temp_path):
+            try:
+                os.unlink(overlay_temp_path)
+                logger.info(f"Cleaned up overlay temp file: {overlay_temp_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up overlay temp file {overlay_temp_path}: {e}")
 
         # Force garbage collection
         gc.collect()
