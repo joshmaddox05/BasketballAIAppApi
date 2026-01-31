@@ -10,7 +10,7 @@ bcrypt==4.1.1
 
 # Computer Vision and AI
 opencv-python-headless==4.10.0.84  # headless version for servers without GUI
-mediapipe==0.10.21
+mediapipe==0.10.32
 numpy==2.0.2
 scipy==1.14.1
 scikit-learn==1.5.2
