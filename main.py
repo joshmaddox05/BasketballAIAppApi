@@ -2,9 +2,10 @@
 Basketball Shot Form Analysis API
 AI-powered shooting form analysis with personalized coaching feedback
 """
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
 import uuid
 import os
 from typing import Dict, Any, Optional
@@ -17,9 +18,29 @@ import logging
 import gc
 
 from services.shot_analysis_service import ShotAnalysisService
+import session_store
+import object_store
+import queueing
+import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Request/Response Models for Async Session Pipeline
+# =============================================================================
+
+class UploadUrlRequest(BaseModel):
+    """Request body for generating a presigned upload URL."""
+    filename: str
+    content_type: str = "video/mp4"
+
+
+class StartRequest(BaseModel):
+    """Request body for starting analysis on an uploaded video."""
+    analysis_mode: str = "shot"  # "shot" or "overlay" (phase 2)
+    frame_skip: int = 1
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -187,10 +208,183 @@ async def health_check():
     }
 
 
+# =============================================================================
+# Async Session Pipeline Endpoints
+# =============================================================================
+
+@app.post("/analysis-sessions")
+async def create_analysis_session():
+    """
+    Create a new analysis session.
+
+    This is step 1 of the async flow:
+    1. Create session -> returns session_id
+    2. Get upload URL -> returns presigned PUT URL
+    3. PUT video to upload URL
+    4. Start analysis -> enqueues job
+    5. Poll session for results
+
+    Returns:
+        Session creation response with session_id and status
+    """
+    try:
+        session = session_store.create_session()
+        return {
+            "success": True,
+            "session_id": session["id"],
+            "status": session["status"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/analysis-sessions/{session_id}/upload-url")
+async def get_upload_url(session_id: str, request: UploadUrlRequest):
+    """
+    Generate a presigned URL for uploading a video.
+
+    Step 2 of the async flow. Client uses the returned URL to PUT the video directly
+    to object storage, bypassing the API server.
+
+    Args:
+        session_id: The session UUID
+        request: Contains filename and content_type
+
+    Returns:
+        Presigned upload URL and required headers
+    """
+    # Validate session exists
+    session = session_store.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Validate content type
+    if not request.content_type.startswith("video/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid content type. Must be a video format (e.g., video/mp4)"
+        )
+
+    try:
+        # Generate object key and presigned URL
+        object_key = object_store.make_object_key(session_id, request.filename)
+        presigned = object_store.presign_put(object_key, request.content_type)
+
+        # Update session with video info
+        session_store.update_session(session_id, {
+            "status": session_store.STATUS_UPLOAD_URL_ISSUED,
+            "video_object_key": object_key,
+            "video_content_type": request.content_type
+        })
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "status": session_store.STATUS_UPLOAD_URL_ISSUED,
+            **presigned
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/analysis-sessions/{session_id}/start")
+async def start_analysis(session_id: str, request: StartRequest):
+    """
+    Start video analysis for a session.
+
+    Step 4 of the async flow. This enqueues the analysis job for background
+    processing. Poll GET /analysis-sessions/{session_id} for results.
+
+    Args:
+        session_id: The session UUID
+        request: Analysis configuration (mode, frame_skip)
+
+    Returns:
+        Confirmation that analysis was queued
+    """
+    # Load session
+    session = session_store.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Validate video was uploaded
+    video_object_key = session.get("video_object_key")
+    if not video_object_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No video uploaded. Please upload a video first using the presigned URL."
+        )
+
+    # Verify video exists in object store
+    try:
+        head_result = object_store.head_object(video_object_key)
+        if not head_result.get("exists"):
+            raise HTTPException(
+                status_code=400,
+                detail="Video file not found. Please upload the video using the presigned URL."
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    # Update session and enqueue job
+    try:
+        session_store.update_session(session_id, {
+            "status": session_store.STATUS_QUEUED,
+            "payload": request.dict()
+        })
+
+        queueing.enqueue_analysis(session_id)
+
+        return {
+            "success": True,
+            "session_id": session_id,
+            "status": session_store.STATUS_QUEUED
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/analysis-sessions/{session_id}")
+async def get_analysis_session(session_id: str):
+    """
+    Get the current state of an analysis session.
+
+    Poll this endpoint to check analysis progress and retrieve results.
+    Status progression: CREATED -> UPLOAD_URL_ISSUED -> QUEUED ->
+                        PROCESSING_EXTRACT -> PROCESSING_ANALYSIS -> DONE/FAILED
+
+    Args:
+        session_id: The session UUID
+
+    Returns:
+        Full session state including status, results (if done), or error (if failed)
+    """
+    try:
+        session = session_store.get_session(session_id)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "success": True,
+        "session": session
+    }
+
+
+# =============================================================================
+# Synchronous Analysis Endpoints (with async_mode option)
+# =============================================================================
+
+
 @app.post("/analyze/shot")
 async def analyze_shot(
     video: UploadFile = File(...),
-    frame_skip: int = Form(default=1)
+    frame_skip: int = Form(default=1),
+    async_mode: bool = Form(default=False)
 ):
     """
     Analyze basketball shooting form from video
@@ -205,14 +399,15 @@ async def analyze_shot(
     Args:
         video: Video file (mp4, mov, avi, mkv)
         frame_skip: Process every Nth frame (default: 1 for best accuracy)
+        async_mode: If True, enqueue for background processing and return session_id (HTTP 202)
 
     Returns:
-        Comprehensive shot analysis with actionable coaching feedback
+        Comprehensive shot analysis with actionable coaching feedback,
+        or session_id if async_mode=True
     """
     file_path = None
 
     try:
-        analysis_service = get_shot_analysis_service()
         video_id = str(uuid.uuid4())
 
         # Validate file type
@@ -232,6 +427,57 @@ async def analyze_shot(
 
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(video.file, buffer)
+
+        # ASYNC MODE: Upload to object store and enqueue job
+        if async_mode:
+            try:
+                # Create session
+                session = session_store.create_session(payload={
+                    "analysis_mode": "shot",
+                    "frame_skip": frame_skip
+                })
+                session_id = session["id"]
+
+                # Determine content type
+                content_type = video.content_type or "video/mp4"
+
+                # Generate object key and upload
+                object_key = object_store.make_object_key(session_id, video.filename)
+                object_store.upload_file(str(file_path), object_key, content_type)
+
+                # Update session with video info
+                session_store.update_session(session_id, {
+                    "status": session_store.STATUS_QUEUED,
+                    "video_object_key": object_key,
+                    "video_content_type": content_type
+                })
+
+                # Enqueue the job
+                queueing.enqueue_analysis(session_id)
+
+                # Clean up local file
+                if file_path and file_path.exists():
+                    file_path.unlink()
+
+                logger.info(f"Async analysis queued: session_id={session_id}")
+
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "success": True,
+                        "session_id": session_id,
+                        "status": session_store.STATUS_QUEUED,
+                        "message": "Analysis queued. Poll GET /analysis-sessions/{session_id} for results."
+                    }
+                )
+
+            except ValueError as e:
+                # Object store or Redis not configured
+                logger.warning(f"Async mode unavailable: {e}. Falling back to sync.")
+                # Fall through to synchronous processing
+
+        # SYNCHRONOUS MODE: Process immediately
+        analysis_service = get_shot_analysis_service()
 
         logger.info(f"Starting analysis for video: {video_id}")
 
@@ -457,7 +703,8 @@ def _format_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/analyze/with-overlay")
 async def analyze_with_overlay_visualization(
     video: UploadFile = File(...),
-    frame_skip: int = Form(default=1)
+    frame_skip: int = Form(default=1),
+    async_mode: bool = Form(default=False)
 ):
     """
     Analyze shot and generate color-coded overlay video
@@ -471,16 +718,15 @@ async def analyze_with_overlay_visualization(
     Args:
         video: Video file (mp4, mov, avi, mkv)
         frame_skip: Process every Nth frame (default: 1)
+        async_mode: If True, enqueue for background processing and return session_id (HTTP 202)
 
     Returns:
-        Analysis results + visualization video download URL
+        Analysis results + visualization video download URL,
+        or session_id if async_mode=True
     """
     file_path = None
 
     try:
-        # Get analysis service
-        analysis_service = get_shot_analysis_service()
-
         # Generate unique video ID
         video_id = str(uuid.uuid4())
 
@@ -493,12 +739,64 @@ async def analyze_with_overlay_visualization(
 
         # Save video file
         file_path = UPLOAD_DIR / f"{video_id}.mp4"
-        logger.info(f"💾 Saving video: {file_path}")
+        logger.info(f"Saving video: {file_path}")
 
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(video.file, buffer)
 
-        logger.info(f"✅ Video saved, starting analysis with overlay...")
+        # ASYNC MODE: Upload to object store and enqueue job
+        if async_mode:
+            try:
+                # Create session
+                session = session_store.create_session(payload={
+                    "analysis_mode": "overlay",
+                    "frame_skip": frame_skip
+                })
+                session_id = session["id"]
+
+                # Determine content type
+                content_type = video.content_type or "video/mp4"
+
+                # Generate object key and upload
+                object_key = object_store.make_object_key(session_id, video.filename)
+                object_store.upload_file(str(file_path), object_key, content_type)
+
+                # Update session with video info
+                session_store.update_session(session_id, {
+                    "status": session_store.STATUS_QUEUED,
+                    "video_object_key": object_key,
+                    "video_content_type": content_type
+                })
+
+                # Enqueue the job
+                queueing.enqueue_analysis(session_id)
+
+                # Clean up local file
+                if file_path and file_path.exists():
+                    file_path.unlink()
+
+                logger.info(f"Async overlay analysis queued: session_id={session_id}")
+
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "success": True,
+                        "session_id": session_id,
+                        "status": session_store.STATUS_QUEUED,
+                        "message": "Overlay analysis queued. Poll GET /analysis-sessions/{session_id} for results."
+                    }
+                )
+
+            except ValueError as e:
+                # Object store or Redis not configured
+                logger.warning(f"Async mode unavailable: {e}. Falling back to sync.")
+                # Fall through to synchronous processing
+
+        # SYNCHRONOUS MODE: Process immediately
+        # Get analysis service
+        analysis_service = get_shot_analysis_service()
+
+        logger.info(f"Video saved, starting analysis with overlay...")
 
         # Perform analysis with overlay
         results = analysis_service.analyze_with_overlay(
@@ -520,8 +818,8 @@ async def analyze_with_overlay_visualization(
             if file_path and file_path.exists():
                 file_path.unlink()
 
-            logger.warning(f"⚠️ Analysis with overlay failed: {error_response['error']}")
-            return JSONResponse(status_code=200, content=error_response, cls=NumpyEncoder)
+            logger.warning(f"Analysis with overlay failed: {error_response['error']}")
+            return JSONResponse(status_code=200, content=error_response)
 
         # Format response
         response = {
@@ -552,17 +850,17 @@ async def analyze_with_overlay_visualization(
         # Clean up original video
         if file_path and file_path.exists():
             file_path.unlink()
-            logger.info(f"🗑️ Cleaned up original video")
+            logger.info(f"Cleaned up original video")
 
-        logger.info(f"✅ Overlay video analysis complete!")
+        logger.info(f"Overlay video analysis complete!")
 
         # Force garbage collection
         gc.collect()
 
-        return JSONResponse(content=response, cls=NumpyEncoder)
+        return JSONResponse(content=response)
 
     except Exception as e:
-        logger.error(f"❌ Overlay analysis error: {str(e)}", exc_info=True)
+        logger.error(f"Overlay analysis error: {str(e)}", exc_info=True)
 
         # Clean up on error
         if file_path and file_path.exists():
