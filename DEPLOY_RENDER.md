@@ -16,6 +16,16 @@ The async pipeline uses:
 - S3-compatible object storage (AWS S3 or Cloudflare R2)
 - Your repository connected to Render
 
+## Important: FFmpeg Requirement
+
+The overlay video feature requires ffmpeg for web-compatible video encoding. Update your **Build Command** for both Web and Worker services:
+
+```bash
+apt-get update && apt-get install -y ffmpeg && pip install -r requirements.txt
+```
+
+Or if you don't have root access, the overlay will still work but videos may not play in some browsers.
+
 ## Step 1: Create Redis Instance
 
 1. In Render Dashboard, click **New > Redis**
