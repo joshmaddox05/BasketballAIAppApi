@@ -51,84 +51,8 @@ class ShotAnalysisService:
         logger.info(f"🏀 Starting shot form analysis for: {video_path}")
 
         try:
-            # Step 1: Extract pose keypoints from video
             pose_data = self.pose_processor.process_video(video_path, frame_skip=frame_skip)
-
-            if pose_data['quality']['confidence'] < 0.5:
-                return {
-                    'success': False,
-                    'error': 'Low video quality or poor visibility of shooter',
-                    'warning': pose_data['quality'].get('warning'),
-                    'confidence': pose_data['quality']['confidence'],
-                    'tips': [
-                        'Ensure good lighting in your recording area',
-                        'Record from the side angle for best results',
-                        'Make sure your full body is visible in the frame',
-                        'Avoid baggy clothing that obscures body position'
-                    ]
-                }
-
-            # Step 2: Detect shooting phases (dip, load, release, follow-through)
-            fps = pose_data['metadata'].get('fps', 30.0)
-            phases = self.phase_detector.detect_phases(pose_data['keypoints_sequence'], fps=fps)
-
-            if not phases.get('valid', False):
-                return {
-                    'success': False,
-                    'error': 'Could not detect complete shooting motion',
-                    'phases': phases,
-                    'confidence': phases.get('confidence', 0.0),
-                    'tips': [
-                        'Make sure to record a complete shot from start to finish',
-                        'Include the catch/dip, load, release, and follow-through',
-                        'Try recording at a slower pace if motion blur is an issue'
-                    ]
-                }
-
-            # Step 3: Calculate biomechanical metrics
-            metrics = self.metrics_calculator.calculate_all_metrics(
-                pose_data['keypoints_sequence'],
-                phases
-            )
-
-            if 'error' in metrics:
-                return {
-                    'success': False,
-                    'error': metrics['error'],
-                    'confidence': metrics.get('confidence', 0.0)
-                }
-
-            # Step 4: Generate detailed coaching feedback
-            coaching_cues = self._generate_coaching_cues(metrics)
-
-            # Step 5: Generate improvement summary
-            improvement_summary = self._generate_improvement_summary(metrics)
-
-            # Compile final results
-            results = {
-                'success': True,
-                'analysis_mode': 'form_analysis',
-                'overall_score': metrics['overall_score'],
-                'overall_grade': self._get_grade(metrics['overall_score']),
-                'confidence': min(pose_data['quality']['confidence'], phases['confidence']),
-                'phases': {
-                    'dip_start': phases['dip_start'],
-                    'load': phases['load'],
-                    'release': phases['release'],
-                    'follow_through_end': phases['follow_through_end'],
-                    'shooting_hand': phases.get('shooting_hand', 'right'),
-                    'timing': phases.get('timing', {})
-                },
-                'metrics': metrics,
-                'coaching_cues': coaching_cues,
-                'improvement_summary': improvement_summary,
-                'quality_info': pose_data['quality'],
-                'metadata': pose_data['metadata']
-            }
-
-            logger.info(f"✅ Analysis complete! Score: {metrics['overall_score']:.1f}/100")
-            return results
-
+            return self._analyze_from_pose_data(video_path, pose_data)
         except Exception as e:
             logger.error(f"❌ Analysis failed: {e}", exc_info=True)
             return {
@@ -137,6 +61,96 @@ class ShotAnalysisService:
                 'confidence': 0.0
             }
 
+    def _analyze_from_pose_data(
+        self,
+        video_path: str,
+        pose_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Run analysis pipeline on already-extracted pose data.
+
+        Args:
+            video_path: Path to video file (used for error context only)
+            pose_data: Output from PoseProcessor.process_video
+
+        Returns:
+            Comprehensive analysis results with metrics and coaching cues
+        """
+        if pose_data['quality']['confidence'] < 0.5:
+            return {
+                'success': False,
+                'error': 'Low video quality or poor visibility of shooter',
+                'warning': pose_data['quality'].get('warning'),
+                'confidence': pose_data['quality']['confidence'],
+                'tips': [
+                    'Ensure good lighting in your recording area',
+                    'Record from the side angle for best results',
+                    'Make sure your full body is visible in the frame',
+                    'Avoid baggy clothing that obscures body position'
+                ]
+            }
+
+        # Step 2: Detect shooting phases (dip, load, release, follow-through)
+        fps = pose_data['metadata'].get('fps', 30.0)
+        phases = self.phase_detector.detect_phases(pose_data['keypoints_sequence'], fps=fps)
+
+        if not phases.get('valid', False):
+            return {
+                'success': False,
+                'error': 'Could not detect complete shooting motion',
+                'phases': phases,
+                'confidence': phases.get('confidence', 0.0),
+                'tips': [
+                    'Make sure to record a complete shot from start to finish',
+                    'Include the catch/dip, load, release, and follow-through',
+                    'Try recording at a slower pace if motion blur is an issue'
+                ]
+            }
+
+        # Step 3: Calculate biomechanical metrics
+        metrics = self.metrics_calculator.calculate_all_metrics(
+            pose_data['keypoints_sequence'],
+            phases
+        )
+
+        if 'error' in metrics:
+            return {
+                'success': False,
+                'error': metrics['error'],
+                'confidence': metrics.get('confidence', 0.0)
+            }
+
+        # Step 4: Generate detailed coaching feedback
+        coaching_cues = self._generate_coaching_cues(metrics)
+
+        # Step 5: Generate improvement summary
+        improvement_summary = self._generate_improvement_summary(metrics)
+
+        # Compile final results
+        results = {
+            'success': True,
+            'analysis_mode': 'form_analysis',
+            'overall_score': metrics['overall_score'],
+            'overall_grade': self._get_grade(metrics['overall_score']),
+            'confidence': min(pose_data['quality']['confidence'], phases['confidence']),
+            'phases': {
+                'dip_start': phases['dip_start'],
+                'load': phases['load'],
+                'release': phases['release'],
+                'follow_through_end': phases['follow_through_end'],
+                'shooting_hand': phases.get('shooting_hand', 'right'),
+                'timing': phases.get('timing', {})
+            },
+            'metrics': metrics,
+            'coaching_cues': coaching_cues,
+            'improvement_summary': improvement_summary,
+            'quality_info': pose_data['quality'],
+            'metadata': pose_data['metadata']
+        }
+
+        logger.info(f"✅ Analysis complete! Score: {metrics['overall_score']:.1f}/100")
+        return results
+
     def analyze_with_overlay(
         self,
         video_path: str,
@@ -144,11 +158,14 @@ class ShotAnalysisService:
         frame_skip: int = 1
     ) -> Dict[str, Any]:
         """
-        Complete analysis with color-coded overlay visualization
+        Complete analysis with color-coded overlay visualization.
+
+        Pose extraction is performed once and shared between the analysis
+        pipeline and the overlay renderer.
 
         Args:
             video_path: Path to user's video
-            baseline_player: Ignored (for backwards compatibility)
+            baseline_player: Ignored (kept for backwards compatibility)
             frame_skip: Process every Nth frame
 
         Returns:
@@ -156,26 +173,27 @@ class ShotAnalysisService:
         """
         logger.info(f"🎨 Analysis with overlay visualization")
 
-        # Run standard analysis
-        results = self.analyze_shot(video_path, frame_skip)
+        try:
+            # Extract pose data once — reused by both analysis and overlay
+            pose_data = self.pose_processor.process_video(video_path, frame_skip=frame_skip)
+        except Exception as e:
+            logger.error(f"❌ Pose extraction failed: {e}", exc_info=True)
+            return {'success': False, 'error': str(e), 'confidence': 0.0}
+
+        results = self._analyze_from_pose_data(video_path, pose_data)
 
         if not results.get('success'):
             return results
 
-        # Generate overlay video
+        # Generate overlay video using the already-extracted keypoints
         try:
-            # Get pose data from cache (already processed)
-            pose_data = self.pose_processor.process_video(video_path, frame_skip=frame_skip)
-
             overlay_video_path = self.video_visualizer.create_overlay_video(
                 video_path=video_path,
                 keypoints_sequence=pose_data['keypoints_sequence'],
                 analysis_results=results
             )
-
             results['overlay_video_path'] = overlay_video_path
             logger.info(f"✅ Overlay video generated: {overlay_video_path}")
-
         except Exception as e:
             logger.error(f"❌ Overlay video generation failed: {e}", exc_info=True)
             results['overlay_video_error'] = str(e)

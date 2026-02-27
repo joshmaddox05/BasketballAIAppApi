@@ -39,7 +39,7 @@ class UploadUrlRequest(BaseModel):
 
 class StartRequest(BaseModel):
     """Request body for starting analysis on an uploaded video."""
-    analysis_mode: str = "shot"  # "shot" or "overlay" (phase 2)
+    analysis_mode: str = "overlay"  # "overlay" (with video) or "shot" (metrics only)
     frame_skip: int = 1
 
 
