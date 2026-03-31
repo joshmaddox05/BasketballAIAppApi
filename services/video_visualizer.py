@@ -4,6 +4,8 @@ Green = Good technique | Yellow = Needs improvement | Red = Poor technique
 """
 import cv2
 import numpy as np
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 import logging
@@ -151,8 +153,74 @@ class VideoVisualizer:
         cap.release()
         out.release()
 
+        # Re-encode with ffmpeg for web compatibility (H.264)
+        output_path = self._reencode_for_web(output_path)
+
         logger.info(f"✅ Visualization saved: {output_path}")
         return str(output_path)
+
+    def _reencode_for_web(self, video_path: Path) -> Path:
+        """
+        Re-encode video with H.264 codec for web browser compatibility.
+
+        Args:
+            video_path: Path to the input video
+
+        Returns:
+            Path to the web-compatible video
+        """
+        try:
+            # Create output path for re-encoded video
+            web_path = video_path.parent / f"{video_path.stem}_web.mp4"
+
+            # Use ffmpeg to re-encode with H.264 (libx264) codec
+            # -y: overwrite output file
+            # -i: input file
+            # -c:v libx264: use H.264 codec
+            # -preset fast: encoding speed/quality tradeoff
+            # -crf 23: quality (lower = better, 23 is default)
+            # -pix_fmt yuv420p: pixel format for compatibility
+            # -movflags +faststart: optimize for web streaming
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', str(video_path),
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-crf', '23',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-an',  # no audio
+                str(web_path)
+            ]
+
+            logger.info(f"Re-encoding video for web compatibility...")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout
+            )
+
+            if result.returncode == 0:
+                # Remove original file and rename web version
+                video_path.unlink()
+                web_path.rename(video_path)
+                logger.info(f"Successfully re-encoded video with H.264")
+                return video_path
+            else:
+                logger.warning(f"ffmpeg re-encoding failed: {result.stderr}")
+                # Return original file if re-encoding fails
+                return video_path
+
+        except FileNotFoundError:
+            logger.warning("ffmpeg not found, skipping re-encoding")
+            return video_path
+        except subprocess.TimeoutExpired:
+            logger.warning("ffmpeg re-encoding timed out")
+            return video_path
+        except Exception as e:
+            logger.warning(f"Re-encoding failed: {e}")
+            return video_path
 
     def _detect_rotation(self, cap) -> Optional[int]:
         """Detect if video needs rotation based on metadata"""

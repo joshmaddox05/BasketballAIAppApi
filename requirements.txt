@@ -21,3 +21,9 @@ aiofiles==23.2.1
 
 # For production
 gunicorn==21.2.0  # Alternative ASGI server
+
+# Async session pipeline
+redis==5.0.1
+rq==1.15.1
+boto3==1.34.19
+botocore==1.34.19

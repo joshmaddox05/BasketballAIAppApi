@@ -65,35 +65,147 @@ GET /health
 ```
 Returns server status.
 
+### Shot Analysis (Synchronous)
+```http
+POST /analyze/shot
+Content-Type: multipart/form-data
+
+Body:
+  video: Video file (MP4, MOV, AVI, MKV)
+  frame_skip: int (optional, default: 1)
+  async_mode: bool (optional, default: false)
+```
+
+Returns comprehensive shot analysis with metrics and coaching feedback.
+
+### Shot Analysis with Overlay
+```http
+POST /analyze/with-overlay
+Content-Type: multipart/form-data
+
+Body:
+  video: Video file (MP4, MOV, AVI, MKV)
+  frame_skip: int (optional, default: 1)
+  async_mode: bool (optional, default: false)
+```
+
+Returns analysis plus a color-coded overlay video visualization.
+
+---
+
+## Async Session Flow (Recommended for Mobile)
+
+The async session pipeline allows clients to upload videos directly to object storage and poll for results, reducing API server load and improving reliability.
+
+### Step 1: Create Session
+```http
+POST /analysis-sessions
+
+Response:
+{
+  "success": true,
+  "session_id": "uuid",
+  "status": "CREATED"
+}
+```
+
+### Step 2: Get Upload URL
+```http
+POST /analysis-sessions/{session_id}/upload-url
+Content-Type: application/json
+
+{
+  "filename": "shot.mp4",
+  "content_type": "video/mp4"
+}
+
+Response:
+{
+  "success": true,
+  "session_id": "uuid",
+  "status": "UPLOAD_URL_ISSUED",
+  "upload_url": "https://...",
+  "headers": {"Content-Type": "video/mp4"},
+  "object_key": "uploads/uuid.mp4"
+}
+```
+
+### Step 3: Upload Video
+```http
+PUT {upload_url}
+Content-Type: video/mp4
+
+Body: raw video bytes
+```
+
+Upload directly to object storage using the presigned URL.
+
+### Step 4: Start Analysis
+```http
+POST /analysis-sessions/{session_id}/start
+Content-Type: application/json
+
+{
+  "analysis_mode": "shot",
+  "frame_skip": 1
+}
+
+Response:
+{
+  "success": true,
+  "session_id": "uuid",
+  "status": "QUEUED"
+}
+```
+
+### Step 5: Poll for Results
+```http
+GET /analysis-sessions/{session_id}
+
+Response (processing):
+{
+  "success": true,
+  "session": {
+    "id": "uuid",
+    "status": "PROCESSING_ANALYSIS",
+    ...
+  }
+}
+
+Response (complete):
+{
+  "success": true,
+  "session": {
+    "id": "uuid",
+    "status": "DONE",
+    "result": { ...full analysis results... },
+    "quality": {...},
+    "timings_ms": {...}
+  }
+}
+```
+
+### Session Status Values
+- `CREATED` - Session created, waiting for upload URL request
+- `UPLOAD_URL_ISSUED` - Presigned URL generated, waiting for video upload
+- `QUEUED` - Analysis job queued for processing
+- `PROCESSING_EXTRACT` - Downloading video from object storage
+- `PROCESSING_ANALYSIS` - Running pose detection and analysis
+- `DONE` - Analysis complete, results available
+- `FAILED` - Analysis failed, error details available
+
+---
+
+### Legacy Endpoints (Deprecated)
+
+These endpoints are maintained for backward compatibility:
+
 ### Video Upload
 ```http
 POST /upload/video
 Content-Type: multipart/form-data
 
 Body: video file (MP4, MOV, AVI)
-```
-
-### Comprehensive Analysis
-```http
-POST /analyze/comprehensive
-Content-Type: application/json
-
-{
-  "video_id": "uuid",
-  "analysis_mode": "shooting",
-  "camera_type": "back"
-}
-```
-
-### Shooting Form Analysis
-```http
-POST /analyze/shooting
-Content-Type: application/json
-
-{
-  "video_id": "uuid",
-  "user_id": "string"
-}
 ```
 
 ### Get Curry Baseline
